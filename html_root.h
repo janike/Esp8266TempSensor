@@ -18,8 +18,10 @@ const char htmlRoot[] PROGMEM = R"=====(
               el = document.getElementById('data-voltage');
               if(el) el.innerHTML = values['voltage'] + ' V';;
               el = document.getElementById('data-temperature');
-              if(el) el.innerHTML = values['temperature'] + '&#8451';
-              tt=setTimeout(rr,2000);
+              if(el) el.innerHTML = parseFloat(values['temperature']).toFixed(2) + '&#8451';
+              el = document.getElementById('data-humidity');
+              if(el) el.innerHTML = parseFloat(values['humidity']).toFixed(0) + '%';
+              tt=setTimeout(rr, 5000);
             }
         }
         xmlHttp.open("GET", '/check?'+p, true);
@@ -53,7 +55,9 @@ const char htmlRoot[] PROGMEM = R"=====(
     <table style="width:100%"></table><table style="width:100%">
       <tbody>
         <tr><td id="data-temperature" style="width:100%;text-align:center;font-weight:normal;font-size:62px">--- &#8451</td></tr>
-        <tr><td id="data-voltage" style="width:100%;text-align:center;font-weight:normal;font-size:31px">0 V</td></tr>
+        <!-- UNCOMMENT NEXT LINE IF SENSOR is DHT TYPE -->
+        <!--<tr><td id="data-humidity" style="width:100%;text-align:center;font-weight:normal;font-size:62px">--- %</td></tr
+        <tr><td id="data-voltage" style="width:100%;text-align:center;font-weight:normal;font-size:31px">0 V</td></tr>-->
         <tr></tr>
       </tbody>
     </table>

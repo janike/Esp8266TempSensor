@@ -1,12 +1,21 @@
 #include <ArduinoJson.h>
 #include "DHT.h"
+#include <DallasTemperature.h>
 #include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <NTPClient.h>
+#include <OneWire.h>
 #include <PubSubClient.h>
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
+
+#define DHT11 1
+#define DHT22 2
+#define DS18B20 3
+
+//#define SENSOR DHT22
+#define SENSOR DS18B20
 
 #include "html_root.h"
 #include "html_config.h"
@@ -20,25 +29,20 @@
  #define DEBUG_PRINTLN(x)
 #endif
 
-
 #define AP_SSID "Esp8266"
 #define AP_PASS "12345678"
 
 //analog read constant to calculate input volgate - depends on voltage divider ratio
-//#define ANALOG_READ_CONSTANT 0.00698 // 1st version
-//#define ANALOG_READ_CONSTANT 0.006303 // 2nd version
 #define ANALOG_READ_CONSTANT 0.006303 // esp temp board 1.0
 
-#define DHTPIN 13     //D3 on 1st version, D1 on 2nd version, 13 on esp temp board 1.0
-#define DHTTYPE DHT22 //DHT11 / DTH22
-#define BUTTON_PIN D2
+#define SENSOR_PIN 13     //D3 on 1st version, D1 on 2nd version, 13 on esp temp board 1.0
+#define BUTTON_PIN 4
 #define LED_PIN D4
 
 #define EEPROM_OFFSET 60
-#define SENSOR_RETRIES 0
-#define SLEEPTIME 300       // seconds
-#define ERROR_SLEEPTIME 300 // seconds
-#define BLINK_DELAY 100     // miliseconds
+#define SENSOR_RETRIES 8
+#define BLINK_DELAY 100        // miliseconds
+#define MQTT_PUB_INTERVAL 5000 // miliseconds
 
 struct s_settings {
   char c;
@@ -59,12 +63,20 @@ StaticJsonDocument<250> doc;
 ESP8266WebServer server(80);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
-unsigned long lastMsg = 0;
+unsigned long lastMqttPub = 0;
 unsigned long startTime = 0;
-int value = 0;
 int buttonValue = 0;
+bool mqttActive = false;
 
-DHT dht(DHTPIN, DHTTYPE);
+#if SENSOR == DHT11
+  DHT dht(SENSOR_PIN, DHT11);
+#elif SENSOR == DHT22
+ DHT dht(SENSOR_PIN, DHT22);
+#elif SENSOR == DS18B20
+ OneWire oneWire(SENSOR_PIN);
+ DallasTemperature sensors(&oneWire);
+#endif
+
 float temperature;
 float humidity;
 float analogVoltage;
@@ -79,13 +91,13 @@ void readVoltage();
 void pubData();
 void ledBlink(int count);
 
-
 int EEPROMAnythingWrite(int pos, char *zeichen, int lenge);
 int EEPROMAnythingRead(int pos, char *zeichen, int lenge);
 int connectToWifi();
 int createWifi();
 
 void readSendSleep();
+void readSend();
 
 void loadDefaultSettings();
 void printSettings();
@@ -93,7 +105,6 @@ void printSettings();
 void handleRoot();
 void handleConfig();
 void handleCheck();
-//void handleSet();
 void handleGetConfig();
 void handleEditPost();
 void handleNotFound();
@@ -109,7 +120,12 @@ void setup() {
 
   EEPROM.begin(512);
 
+#if SENSOR == DS18B20
+  sensors.begin();
+#else
   dht.begin();
+#endif
+
   timeClient.begin();
   timeClient.setTimeOffset(3600);
   
@@ -131,11 +147,9 @@ void setup() {
   if(digitalRead(BUTTON_PIN) == LOW) {
     g_settings.webServer = true;
     ledBlink(1);
-    delay(2000);
+    delay(3000);
     if(digitalRead(BUTTON_PIN) == LOW) {
       g_settings.apMode = true;
-        DEBUG_PRINTLN("Webserver AP mode");
-        ledBlink(4);
     } else {
         DEBUG_PRINTLN("Webserver on saved wifi");
         ledBlink(3);
@@ -145,25 +159,29 @@ void setup() {
 
 
   if(g_settings.apMode) {
+    DEBUG_PRINTLN("Webserver AP mode");
+    ledBlink(4);
     createWifi();
   } else {
-    if(!connectToWifi()) {
+    if(connectToWifi()) {
+      if(g_settings.webServer) ledBlink(3);
+      mqttClient.setServer(g_settings.mqttIp, 1883);
+      mqttActive = mqtt_connect();
+    } else {
       DEBUG_PRINTLN("Unable to connect to wifi, going to sleep ...");
       digitalWrite(LED_PIN, LOW);
       delay(500);
-      ESP.deepSleep(ERROR_SLEEPTIME*1000000);  
+      ESP.deepSleep(g_settings.sleepTime*1000000); 
     }
   }
 
   if(!g_settings.webServer) {
-    ledBlink(1);
     readSendSleep();
   }
 
   server.on("/", handleRoot);
   server.on("/config", handleConfig);
   server.on("/check", handleCheck);
-  //server.on("/set", handleSet);
   server.on("/getconfig", handleGetConfig);
   server.on("/editpost", handleEditPost);
   
@@ -176,16 +194,19 @@ void loop()
 {
   server.handleClient();
 
+  if (mqttActive && millis() - lastMqttPub > MQTT_PUB_INTERVAL) {
+      readSend();
+      lastMqttPub = millis();
+  }
+
   delay(10);
 }
 
 void loadDefaultSettings()
 {
   g_settings.c = 's';
-  //g_settings.ssid[15];
-  //g_settings.passwd[15];
   g_settings.staticIp = false;
-  g_settings.analogCoef = 1; //0.100847;
+  g_settings.analogCoef = 1;
   g_settings.apMode = true;
   g_settings.webServer = true;
   g_settings.sleepTime = 300;
@@ -216,8 +237,6 @@ int createWifi()
   DEBUG_PRINTLN(AP_SSID);
   WiFi.softAP(AP_SSID, AP_PASS);
   delay(100);
-  //WiFi.softAPConfig(ip, ip, subnet);
-  //IPAddress ip = WiFi.softAPIP();
   DEBUG_PRINT("AP IP address: ");
   DEBUG_PRINTLN(WiFi.softAPIP());
 };
@@ -276,14 +295,23 @@ bool readTemperature()
 {
   int count = 0;
   DEBUG_PRINT("reading from sensor ");
-  humidity = dht.readHumidity();
-  temperature = dht.readTemperature();
-  while(isnan(humidity) || isnan(temperature)){
+  #if SENSOR == DS18B20
+    sensors.requestTemperatures();
+    temperature = sensors.getTempCByIndex(0);
+    if(temperature == DEVICE_DISCONNECTED_C) {
+      temperature = 0;
+      humidity = 0;
+      return false;
+    }
+  #else
+    humidity = dht.readHumidity();
+    temperature = dht.readTemperature();
+    while(isnan(humidity) || isnan(temperature)){
     if(count > SENSOR_RETRIES) {
       DEBUG_PRINTLN();
-      temperature = 333;
-      humidity = 222;
-      return true; // only testing without sensor
+      temperature = 0;
+      humidity = 0;
+      //return true; // only testing without sensor
       return false;
     }
     DEBUG_PRINT(".");
@@ -292,14 +320,19 @@ bool readTemperature()
     temperature = dht.readTemperature();
     count++;
   }
-  DEBUG_PRINT("T:");DEBUG_PRINT(temperature);
+  humidity = roundf(humidity);
   DEBUG_PRINT(" H:");DEBUG_PRINTLN(humidity);
+  #endif
+  
+  temperature = roundf(100*temperature)/100;
+  DEBUG_PRINT("T:");DEBUG_PRINTLN(temperature);
+
   return true;
 }
 
 void readVoltage()
 {
-  delay(200);
+  delay(50);
   analogVoltage = analogRead(A0);
   DEBUG_PRINT("A0 value: ");
   DEBUG_PRINTLN(analogVoltage);
@@ -320,9 +353,11 @@ void pubData()
     doc["timestamp"] = timestamp;
     doc["value"] = analogVoltage;
     
-    doc["inVoltage"] = roundf(100*analogVoltage*ANALOG_READ_CONSTANT)/100;
+    doc["inVoltage"] = roundf(100*analogVoltage*g_settings.analogCoef)/100;
     doc["temperature"] = temperature;
-    doc["humidity"] = humidity;
+    #if SENSOR != DS18B20
+      doc["humidity"] = humidity;
+    #endif
     #ifdef BUTTON_PIN
       doc["buttonState"] = buttonValue ? "NOT PRESSED" : "PRESSED"; // press = LOW on BUTTON_PIN
     #endif BUTTON_PIN
@@ -349,14 +384,12 @@ void ledBlink(int count)
 }
 
 void readSendSleep()
-{
-  mqttClient.setServer(g_settings.mqttIp, 1883);
-
-  if(!mqtt_connect()) {
-    DEBUG_PRINTLN("Unable to connect to mqtt server, going to sleep ...");
+{ 
+  if(!mqttActive) {
+    DEBUG_PRINTLN("MQTT fail - going to sleep ...");
     digitalWrite(LED_PIN, LOW);
     delay(500);
-    ESP.deepSleep(ERROR_SLEEPTIME*1000000);
+    ESP.deepSleep(g_settings.sleepTime*1000000);
   }
 
   readVoltage();
@@ -365,7 +398,7 @@ void readSendSleep()
     DEBUG_PRINTLN("Unable to read temperature, going to sleep ...");
     digitalWrite(LED_PIN, LOW);
     delay(500);
-    ESP.deepSleep(ERROR_SLEEPTIME*1000000);
+    ESP.deepSleep(g_settings.sleepTime*1000000);
   }
  
   #ifdef BUTTON_PIN
@@ -383,7 +416,24 @@ void readSendSleep()
   DEBUG_PRINTLN(endTime - startTime);
   DEBUG_PRINTLN("Going to sleep now ...");
 
-  ESP.deepSleep(SLEEPTIME*1000000); //micro seconds to seconds
+  ESP.deepSleep(g_settings.sleepTime*1000000); //micro seconds to seconds
+}
+
+void readSend()
+{
+  readVoltage();
+  
+  if(!readTemperature()) {
+    return;
+  }
+ 
+  #ifdef BUTTON_PIN
+    buttonValue = digitalRead(BUTTON_PIN);
+  #endif
+
+  readTimestamp();
+  
+  pubData();  
 }
 
 void handleRoot()
@@ -405,15 +455,14 @@ void handleGetConfig()
   String out = "";
   doc.clear();
   doc["voltage"] = roundf(100*analogVoltage*g_settings.analogCoef)/100;
-  doc["temperature"] = 0;//temperature;
-  doc["humidity"] = 0;//humidity
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
    
   doc["ssid"] = g_settings.ssid;
   doc["passwd"] = g_settings.passwd;
-  //doc["staticIp"] = g_settings.staticIp;
   doc["mqttIp"] = g_settings.mqttIp;
   doc["mqttTopic"] = g_settings.mqttTopic;
-  doc["analogCoef"] = round(10000*g_settings.analogCoef)/10000;
+  doc["analogCoef"] = round(1000000*g_settings.analogCoef)/1000000;
   doc["apMode"] = g_settings.apMode;
   doc["webServer"] = g_settings.webServer;
   doc["sleepTime"] = g_settings.sleepTime;
@@ -433,8 +482,8 @@ void handleCheck()
   String out = "";
   doc.clear();
   doc["voltage"] = voltage;
-  doc["temperature"] = 0; //temperature;
-  doc["humidity"] = 0; //humidity;
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
 
   serializeJson(doc, out);
   

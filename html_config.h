@@ -4,7 +4,7 @@ const char htmlConfig[] PROGMEM = R"=====(
 <head>
 <meta http-equiv="content-type" content="text/html; charset=UTF-8"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>ESP8266 DinRelay Config</title>
+<title>ESP8266 TempSensor Config</title>
 <script>
   function load(){
       var xmlHttp = new XMLHttpRequest();
@@ -39,14 +39,14 @@ const char htmlConfig[] PROGMEM = R"=====(
   <div style="text-align:left;display:inline-block;color:#eaeaea;min-width:340px;">
     <div style="text-align:center;color:#eaeaea;">
       <noscript>To use This enable JavaScript<br></noscript>
-      <h2>ESP8266 DinRelay Config</h2>
+      <h2>ESP8266 TempSensor config</h2>
     </div>
     <fieldset><legend><b>&nbsp;General&nbsp;</b></legend>
       <form method="post" action="/editpost"><p></p>
 
         <label><b>MQTT IP</b></label><br><input id="mqttIp" type="text" name="mqttIp"><br><br>
         <label><b>MQTT Topic</b></label><br><input id="mqttTopic" type="text" name="mqttTopic"><br><br>
-        <label><b>AnalogCoef</b></label><br><input id="analogCoef" step="0.0001" type="number" name="analogCoef"><br><br>
+        <label><b>AnalogCoef</b></label><br><input id="analogCoef" step="0.000001" type="number" name="analogCoef"><br><br>
         <label><b>SleepTime</b></label><br><input id="sleepTime" type="number" name="sleepTime"><br><br>
         <br>
         <fieldset>
